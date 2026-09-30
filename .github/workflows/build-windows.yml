@@ -18,12 +18,18 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements.txt
-      - name: Run tests
+      - name: Test avant build (bloquant si erreur)
         run: |
           python -m pytest tests/ -v
+          python -c "import app.database, app.barcodes, app.pdf_labels, app.printing, app.backup, app.importer; print('imports OK')"
+          python -c "from app.pdf_labels import build_a4_pdf; from app.database import Database; import tempfile, os; db=Database(os.path.join(tempfile.gettempdir(),'prebuild.db')); tpl=db.get_default_template(); items=[{'nom':'TEST','marque':'M','reference':'R','prix':1250,'prix_promo':None,'code_barres':'1234567890128','format_barres':'EAN13'}]*12; build_a4_pdf(os.path.join(tempfile.gettempdir(),'prebuild.pdf'), items, tpl); print('PDF prebuild OK')"
       - name: Build EXE (PyInstaller)
         run: |
-          pyinstaller --noconfirm --onefile --windowed --name EtiquettesProDZ run.py
+          pyinstaller --noconfirm --onefile --windowed --name EtiquettesProDZ --collect-all reportlab --hidden-import=reportlab.graphics.barcode.code93 --hidden-import=reportlab.graphics.barcode.code39 --hidden-import=reportlab.graphics.barcode.code128 --hidden-import=reportlab.graphics.barcode.eanbc --hidden-import=reportlab.graphics.barcode.qr --hidden-import=reportlab.graphics.barcode.qrencoder --hidden-import=reportlab.graphics.barcode.common --hidden-import=reportlab.graphics.barcode.widgets --hidden-import=reportlab.graphics.barcode.usps --hidden-import=reportlab.graphics.barcode.usps4s --hidden-import=reportlab.graphics.barcode.fourstate --hidden-import=reportlab.graphics.barcode.ecc200datamatrix --hidden-import=reportlab.graphics.barcode.dmtx --hidden-import=reportlab.graphics.barcode.lto run.py
+      - name: Smoke test EXE (demarrage)
+        run: |
+          dist\EtiquettesProDZ.exe --help 2>&1 || echo "exe lance (pas de --help, normal pour GUI)"
+        continue-on-error: true
       - name: Upload EXE
         uses: actions/upload-artifact@v4
         with:

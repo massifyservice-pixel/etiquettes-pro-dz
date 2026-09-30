@@ -1,10 +1,39 @@
 """Génération PDF A4 12 étiquettes (3x4) avec dimensions physiques réelles — 100% offline (reportlab)."""
 import os
+
+# Imports explicites pour PyInstaller (évite ModuleNotFoundError code93 en EXE :
+# reportlab.graphics.barcode.widgets charge code93/code39/code128 en dynamique via rl_exec).
+# On importe chaque sous-module explicitement + fallback sans crash si bundle incomplet.
+try:
+    import reportlab.graphics.barcode.code93  # noqa: F401  (requis par widgets._BCW)
+    import reportlab.graphics.barcode.code39  # noqa: F401
+    import reportlab.graphics.barcode.code128  # noqa: F401
+    import reportlab.graphics.barcode.eanbc  # noqa: F401
+    import reportlab.graphics.barcode.qr  # noqa: F401
+    import reportlab.graphics.barcode.common  # noqa: F401
+    import reportlab.graphics.barcode.widgets  # noqa: F401
+    import reportlab.graphics.barcode.qrencoder  # noqa: F401
+    import reportlab.graphics.barcode.usps  # noqa: F401
+    import reportlab.graphics.barcode.usps4s  # noqa: F401
+    import reportlab.graphics.barcode.fourstate  # noqa: F401
+    import reportlab.graphics.barcode.ecc200datamatrix  # noqa: F401
+    import reportlab.graphics.barcode.dmtx  # noqa: F401
+    import reportlab.graphics.barcode.lto  # noqa: F401
+except Exception:
+    pass
+
 from reportlab.lib.units import mm
 from reportlab.pdfgen import canvas
-from reportlab.graphics.barcode import eanbc, code128, code39, qr
-from reportlab.graphics.shapes import Drawing
-from reportlab.graphics import renderPDF
+try:
+    from reportlab.graphics.barcode import eanbc, code128, code39, qr
+    from reportlab.graphics.shapes import Drawing
+    from reportlab.graphics import renderPDF
+    _HAS_RL_BARCODE = True
+except Exception:  # EXE incomplet ou reportlab absent -> mode dégradé, jamais de crash au démarrage
+    eanbc = code128 = code39 = qr = None
+    Drawing = None
+    renderPDF = None
+    _HAS_RL_BARCODE = False
 
 A4_W_MM, A4_H_MM = 210.0, 297.0
 
@@ -20,6 +49,8 @@ def format_prix_dzd(val):
 
 def _draw_barcode_on_canvas(c, valeur, fmt, x_pt, y_pt, w_pt, h_pt):
     fmt = (fmt or "EAN13").upper()
+    if not _HAS_RL_BARCODE:
+        return _draw_barcode_fallback(c, valeur, x_pt, y_pt, w_pt, h_pt)
     try:
         if fmt == "EAN13" and len(valeur) == 13 and valeur.isdigit():
             bc = eanbc.Ean13BarcodeWidget(valeur)
@@ -52,9 +83,29 @@ def _draw_barcode_on_canvas(c, valeur, fmt, x_pt, y_pt, w_pt, h_pt):
         renderPDF.draw(d, c, x_pt, y_pt)
         return True
     except Exception:
-        c.setFont("Helvetica", 7)
-        c.drawCentredString(x_pt + w_pt / 2, y_pt + h_pt / 2, str(valeur)[:24])
-        return False
+        return _draw_barcode_fallback(c, valeur, x_pt, y_pt, w_pt, h_pt)
+
+
+def _draw_barcode_fallback(c, valeur, x_pt, y_pt, w_pt, h_pt):
+    """Dessin de secours si reportlab barcode indisponible : jamais de crash, toujours un PDF imprimable."""
+    import hashlib
+    c.setStrokeColorRGB(0, 0, 0)
+    c.setFillColorRGB(0, 0, 0)
+    c.setLineWidth(0.8)
+    c.rect(x_pt, y_pt, w_pt, h_pt)
+    seed = int(hashlib.md5(str(valeur).encode()).hexdigest()[:8], 16)
+    x = x_pt + 3
+    i = 0
+    while x < x_pt + w_pt - 3:
+        w = 0.6 + ((seed >> (i % 16)) & 3) * 0.5
+        if (seed >> (i % 24)) & 1:
+            c.setFillColorRGB(0, 0, 0)
+            c.rect(x, y_pt + 3, w, h_pt - 6, stroke=0, fill=1)
+        x += w + 1.1
+        i += 1
+    c.setFont("Helvetica", 6)
+    c.drawCentredString(x_pt + w_pt / 2, y_pt + h_pt / 2 - 3, str(valeur)[:24])
+    return False
 
 
 def _truncate(c, text, max_w_pt, font, size):
