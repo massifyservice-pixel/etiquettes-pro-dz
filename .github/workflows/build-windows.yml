@@ -3,6 +3,7 @@ name: Build Windows EXE
 on:
   push:
     branches: [ main ]
+    tags: [ 'v*' ]
   workflow_dispatch:
 
 jobs:
