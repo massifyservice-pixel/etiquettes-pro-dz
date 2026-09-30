@@ -22,6 +22,120 @@ def format_dzd(v):
 
 A4_W_MM, A4_H_MM = 210.0, 297.0
 
+# ---------- Style DOCX 600 : 3 colonnes collées + coupe, agrandi lisible (7pt vs 5pt docx) ----------
+DOCX_MARGIN_MM = 7.6
+DOCX_CUT_MM = 6.0
+DOCX_FONT = "Courier"
+DOCX_FONT_BOLD = "Courier-Bold"
+DOCX_SIZE = 7  # agrandi juste un peu pour lisibilité (docx = 5pt)
+
+
+def draw_docx_ticket_cell(c, x_mm, y_top_mm, w_mm, h_mm, dticket):
+    """Un ticket style docx exact, collé aux voisins. dticket = dict de docx_format.generate_600."""
+    x = x_mm * mm
+    y_top = A4_H_MM * mm - y_top_mm * mm
+    w, h = w_mm * mm, h_mm * mm
+    y_bottom = y_top - h
+    c.setFillColorRGB(1, 1, 1)
+    c.rect(x, y_bottom, w, h, stroke=0, fill=1)
+    c.setFillColorRGB(0, 0, 0)
+    # texte monospace, interligne serré mais lisible
+    fs = DOCX_SIZE
+    lh = fs * 0.42 * mm  # ~2.9mm à 7pt
+    cur = y_top - 3.2 * mm
+    max_lines = int((h - 4 * mm) / lh)
+    lines = (dticket.get("text", "") or "").split("\n")
+    # si trop de lignes, on garde tout (tickets docx = ~40 lignes, cellule ~133mm => ~44 lignes max à 7pt, ça passe)
+    if len(lines) > max_lines:
+        # compacter légèrement
+        lh = (h - 4 * mm) / len(lines)
+        fs = min(fs, lh / mm / 0.42)
+    for ln in lines:
+        if cur < y_bottom + 2 * mm:
+            break
+        bold = ln.startswith("***") or ln.startswith("TOTAL") or ln.startswith("ARTICLE")
+        c.setFont(DOCX_FONT_BOLD if bold else DOCX_FONT, fs)
+        # centrer les lignes spéciales
+        if ln.startswith("***") or ln.startswith("MERCI") or ln.startswith("* ") or ln.startswith("|||"):
+            c.drawCentredString(x + w / 2, cur, ln[:44])
+        else:
+            c.drawString(x + 1.2 * mm, cur, ln[:46])
+        cur -= lh
+
+
+def draw_docx_cut_col(c, x_mm, y_top_mm, w_mm, h_mm):
+    x = x_mm * mm
+    y_top = A4_H_MM * mm - y_top_mm * mm
+    w, h = w_mm * mm, h_mm * mm
+    cx = x + w / 2
+    c.setStrokeColorRGB(0.4, 0.4, 0.4)
+    c.setDash(2, 2)
+    c.setLineWidth(0.5)
+    c.line(cx, y_top, cx, y_top - h)
+    c.setDash()
+    c.setFont("Helvetica", 6)
+    c.drawCentredString(cx, y_top - 4 * mm, "✂")
+
+
+def build_docx_a4_pdf(path, docx_tickets, footer_note=""):
+    """A4 3 colonnes collées comme le docx : 3 tickets + 2 colonnes coupe par rangée, 2 rangées/page = 6/page.
+    Tickets collés pour découper plus tard. Police agrandie 7pt lisible. Retourne (pages, nb)."""
+    import math
+    os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
+    mg = DOCX_MARGIN_MM
+    mh = DOCX_MARGIN_MM
+    cut = DOCX_CUT_MM
+    tw = (A4_W_MM - 2 * mg - 2 * cut) / 3
+    # hauteur rangée : 2 rangées par page (tickets 28 lignes)
+    rows_per_page = 2
+    per_page = 6
+    rh = (A4_H_MM - 2 * mh) / rows_per_page
+    c = canvas.Canvas(path, pagesize=(A4_W_MM * mm, A4_H_MM * mm))
+    c.setTitle("600 Tickets style DOCX — 3 colonnes collées")
+    c.setAuthor("Étiquettes Pro DZ (offline)")
+    if not docx_tickets:
+        c.setFont("Helvetica", 12)
+        c.drawCentredString(A4_W_MM * mm / 2, A4_H_MM * mm / 2, "Aucun ticket")
+        c.showPage()
+        c.save()
+        return 1, 0
+    nb_pages = math.ceil(len(docx_tickets) / per_page)
+    for p in range(nb_pages):
+        chunk = docx_tickets[p * per_page:(p + 1) * per_page]
+        for row in range(rows_per_page):
+            y_top = mh + row * rh
+            row_tickets = chunk[row * 3:(row + 1) * 3]
+            if not row_tickets:
+                continue
+            # ligne de coupe horizontale entre rangées (sauf haut page 1)
+            if row > 0:
+                c.setStrokeColorRGB(0.4, 0.4, 0.4)
+                c.setDash(2, 2)
+                c.setLineWidth(0.5)
+                c.line(mg * mm, A4_H_MM * mm - y_top * mm, (A4_W_MM - mg) * mm, A4_H_MM * mm - y_top * mm)
+                c.setDash()
+                c.setFont("Helvetica", 6)
+                c.drawString(mg * mm, A4_H_MM * mm - y_top * mm + 1 * mm, "✂" + "┆" * 60 + "✂")
+            x = mg
+            for col in range(3):
+                if col < len(row_tickets):
+                    draw_docx_ticket_cell(c, x, y_top, tw, rh, row_tickets[col])
+                # bordure fine de découpe autour de chaque ticket (collé)
+                c.setStrokeColorRGB(0.55, 0.55, 0.55)
+                c.setLineWidth(0.4)
+                c.rect(x * mm, A4_H_MM * mm - (y_top + rh) * mm, tw * mm, rh * mm)
+                x += tw
+                if col < 2:
+                    draw_docx_cut_col(c, x, y_top, cut, rh)
+                    x += cut
+        c.setFont("Helvetica", 6)
+        c.setFillColorRGB(0.5, 0.5, 0.5)
+        c.drawCentredString(A4_W_MM * mm / 2, 5 * mm, f"Tickets {p*per_page+1}-{p*per_page+len(chunk)}/{len(docx_tickets)} — 3 colonnes collées, à découper — 100%")
+        c.setFillColorRGB(0, 0, 0)
+        c.showPage()
+    c.save()
+    return nb_pages, len(docx_tickets)
+
 
 def _truncate_c(c, text, max_w_pt, font, size):
     c.setFont(font, size)

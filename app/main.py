@@ -13,6 +13,7 @@ from . import backup as backup_mod
 from . import importer as importer_mod
 from . import tickets as tickets_mod
 from . import ticket_pdf
+from . import docx_format
 
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
@@ -823,7 +824,7 @@ class App(tk.Tk):
         sbar = ttk.Frame(sheet)
         sbar.pack(fill="x", pady=3)
         ttk.Label(sbar, text="Nb tickets:").pack(side="left", padx=4)
-        self.tk_sheet_n = ttk.Spinbox(sbar, from_=1, to=100, width=6)
+        self.tk_sheet_n = ttk.Spinbox(sbar, from_=1, to=600, width=6)
         self.tk_sheet_n.set("6")
         self.tk_sheet_n.pack(side="left")
         ttk.Label(sbar, text="/feuille:").pack(side="left", padx=(8, 2))
@@ -837,6 +838,15 @@ class App(tk.Tk):
         self.tk_sheet_lbl.pack(side="left", padx=8)
         ttk.Button(sbar, text="📄 Ouvrir PDF planche", command=lambda: self.do_open_pdf_path(getattr(self, "current_sheet_pdf", ""))).pack(side="left", padx=4)
         ttk.Button(sbar, text="🖨️ Imprimer planche", command=self.do_print_sheet).pack(side="left", padx=4)
+        # Ligne style DOCX 600 : même format que ton fichier, 3 colonnes collées à découper
+        sbar2 = ttk.Frame(sheet)
+        sbar2.pack(fill="x", pady=3)
+        ttk.Label(sbar2, text="Style DOCX 600 :").pack(side="left", padx=4)
+        self.tk_docx_style = ttk.Combobox(sbar2, values=["DOCX exact 3 col. collées (défaut, +lisible 7pt)", "Standard 80mm"], width=38, state="readonly")
+        self.tk_docx_style.set("DOCX exact 3 col. collées (défaut, +lisible 7pt)")
+        self.tk_docx_style.pack(side="left", padx=2)
+        ttk.Button(sbar2, text="🧾 Générer 600 tickets style DOCX (3 col. collées)", command=self.do_generate_docx_600).pack(side="left", padx=8)
+        ttk.Label(sbar2, text="= ton fichier : 3 tickets collés/ligne + ✂, agrandi un peu", foreground="#065f46", font=("Segoe UI", 8, "bold")).pack(side="left", padx=6)
         self.tk_sheet_canvas = tk.Canvas(sheet, bg="#6b7280", height=340)
         self.tk_sheet_canvas.pack(fill="both", expand=True)
         self.tk_sheet_info = ttk.Label(sheet, text="Astuce : sélectionnez TOUS les produits → 6 tickets → chaque case A4 = format ticket réel avec supérette et date différentes.",
@@ -1105,12 +1115,86 @@ class App(tk.Tk):
         self.notify("Sélection effacée.")
 
     def _sheet_per_page(self):
+        # mode DOCX : toujours 6 (3x2 collées comme le fichier)
+        if getattr(self, "_sheet_mode", "std") == "docx":
+            return 6
         txt = self.tk_sheet_per.get() if hasattr(self, "tk_sheet_per") else "6"
         if txt.startswith("4"):
             return 4
         if txt.startswith("8"):
             return 8
         return 6
+
+    def do_generate_docx_600(self):
+        """600 tickets style DOCX exact : 3 colonnes collées + ✂, 28 articles, shops/dates tous différents.
+        Même format que 600_Tickets_de_Caisse_Algerie.docx, agrandi 7pt lisible."""
+        try:
+            n = int(self.tk_sheet_n.get() or 600)
+        except Exception:
+            n = 600
+        if n < 100:
+            # le fichier de référence = 600 ; on met 600 par défaut (modifiable via le spin)
+            n = 600
+            try:
+                self.tk_sheet_n.set(str(n))
+            except Exception:
+                pass
+        n = max(1, min(600, n))
+        try:
+            minus = int(self.tk_minus.get() or 3)
+            plus = int(self.tk_plus.get() or 3)
+        except Exception:
+            minus, plus = 3, 3
+        self.notify(f"Génération {n} tickets style DOCX… (peut prendre ~30s)")
+        self.update_idletasks()
+        try:
+            docx_tickets = docx_format.generate_600_like_docx(n, minus, plus)
+        except Exception as e:
+            messagebox.showerror("DOCX", str(e))
+            return
+        # Enregistrer AVANT impression (règle critique) : chaque ticket -> DB
+        ticket_ids = []
+        try:
+            for dt in docx_tickets:
+                lignes = [{"product_id": None, "nom": nom, "reference": "",
+                           "code_barres": "", "prix_unitaire": pu, "quantite": qt}
+                          for nom, qt, pu, _ in dt["lignes"]]
+                tid = self.db.create_ticket(
+                    lignes, dt["shop"],
+                    dt["dt"].isoformat(timespec="seconds"),
+                    {"style": "docx", "addr": dt["addr"], "caisse": dt["caisse"],
+                     "paiement": dt["paiement"], "aut": dt["aut"], "barcode": dt["barcode"],
+                     "numero_int": dt["numero_int"], "recu": dt["recu"], "rendu": dt["rendu"]})
+                ticket_ids.append(tid)
+            sheet_id = self.db.create_ticket_sheet(ticket_ids, 6, {"style": "docx", "n": n})
+        except Exception as e:
+            messagebox.showerror("Enregistrement", f"Échec sauvegarde avant impression:\n{e}")
+            return
+        # PDF A4 3 colonnes collées
+        outdir = self.db.get_setting("pdf_folder", "output")
+        if not os.path.isabs(outdir):
+            outdir = os.path.join(BASE_DIR, outdir)
+        os.makedirs(outdir, exist_ok=True)
+        pdf_path = os.path.join(outdir, f"docx-600-{sheet_id}.pdf")
+        try:
+            nb_pages, nb = ticket_pdf.build_docx_a4_pdf(pdf_path, docx_tickets)
+        except Exception as e:
+            messagebox.showerror("PDF DOCX", str(e))
+            return
+        self._sheet_mode = "docx"
+        self._sheet_docx = docx_tickets
+        self._sheet_tickets = [self.db.get_ticket(tid) for tid in ticket_ids]
+        self._sheet_page = 0
+        self._sheet_id = sheet_id
+        self.current_sheet_pdf = pdf_path
+        job_id = self.db.create_print_job(None, "", 1, "all", pdf_path, "ENREGISTRE",
+                                          f"DOCX {n} tickets 3 col. collées / {nb_pages}p — style fichier 600",
+                                          ticket_id=ticket_ids[0])
+        self.current_ticket_job = job_id
+        self._draw_sheet_preview()
+        self.tk_sheet_info.config(text=f"✅ DOCX {nb} tickets → {nb_pages} pages A4 (6/page, 3 collées) | 1ère: {docx_tickets[0]['shop']} | job {job_id}")
+        self.notify(f"DOCX {n} tickets enregistrés avant impression ({nb_pages} pages).")
+        self.refresh_tickets()
 
     def do_generate_ticket_sheet(self):
         sel = [self._tk_index[i] for i in self.tk_tree.selection() if i in getattr(self, "_tk_index", {})]
@@ -1160,6 +1244,8 @@ class App(tk.Tk):
             messagebox.showerror("Planche", f"Échec sauvegarde avant impression:\n{e}")
             return
         tickets_list = [self.db.get_ticket(tid) for tid in ticket_ids]
+        self._sheet_mode = "std"
+        self._sheet_docx = None
         self._sheet_tickets = tickets_list
         self._sheet_page = 0
         self._sheet_id = sheet_id
@@ -1209,6 +1295,43 @@ class App(tk.Tk):
             return
         per = self._sheet_per_page()
         import math
+        # mode DOCX : preview 3 colonnes collées comme le fichier
+        if getattr(self, "_sheet_mode", "std") == "docx" and getattr(self, "_sheet_docx", None):
+            docx_list = self._sheet_docx
+            nb_pages = max(1, math.ceil(len(docx_list) / 6))
+            self._sheet_page = max(0, min(getattr(self, "_sheet_page", 0), nb_pages - 1))
+            if hasattr(self, "tk_sheet_lbl"):
+                self.tk_sheet_lbl.config(text=f"Page {self._sheet_page+1}/{nb_pages} (DOCX 3 collées)")
+            W, H = 560, 330
+            pw, ph = 210, 297
+            s = min(W / pw, H / ph)
+            dw, dh = pw * s, ph * s
+            x0, y0 = (W - dw) / 2 + 10, 8
+            cv.create_rectangle(x0, y0, x0 + dw, y0 + dh, fill="white", outline="black", width=2)
+            chunk = docx_list[self._sheet_page * 6:(self._sheet_page + 1) * 6]
+            for idx, dt in enumerate(chunk):
+                col, row = idx % 3, idx // 3
+                # 3 tickets + 2 coupes : largeur ticket = (dw-8-2*6)/3
+                cutw = 6
+                tw = (dw - 8 - 2 * cutw) / 3
+                rx = x0 + 4 + col * (tw + cutw)
+                ry = y0 + 4 + row * (dh - 8) / 2
+                rw, rh = tw, (dh - 8) / 2 - 4
+                cv.create_rectangle(rx, ry, rx + rw, ry + rh, fill="white", outline="#333", width=1)
+                if col < 2:
+                    cv.create_line(rx + rw + 1, ry, rx + rw + 1, ry + rh, fill="#888", dash=(2, 2))
+                    cv.create_text(rx + rw + 3, ry + 6, text="✂", font=("Arial", 6), anchor="nw")
+                cv.create_text(rx + rw / 2, ry + 12, text=f"*** {dt['shop'][:22]} ***", font=("Arial", 6, "bold"))
+                cv.create_text(rx + rw / 2, ry + 23, text=f"N°{dt['numero_int']:05d} {dt['dt'].strftime('%d/%m %H:%M')}", font=("Arial", 6))
+                yy = ry + 34
+                for nom, qt, pu, tot in dt["lignes"][:4]:
+                    cv.create_text(rx + 4, yy, text=f"{nom[:14]} x{qt}", font=("Arial", 5), anchor="nw")
+                    cv.create_text(rx + rw - 4, yy, text=f"{tot:.0f}", font=("Arial", 5), anchor="ne")
+                    yy += 9
+                cv.create_text(rx + rw / 2, yy + 2, text=f"… +{len(dt['lignes'])-4} | TOT {dt['total']:.0f} DA", font=("Arial", 6, "bold"))
+            cv.create_text(x0 + dw / 2, y0 + dh + 10, text=f"A4 DOCX — 3 collées + ✂, à découper — page {self._sheet_page+1}/{nb_pages}",
+                           fill="white", font=("Arial", 8, "bold"))
+            return
         nb_pages = max(1, math.ceil(len(tickets) / per))
         self._sheet_page = max(0, min(getattr(self, "_sheet_page", 0), nb_pages - 1))
         if hasattr(self, "tk_sheet_lbl"):
