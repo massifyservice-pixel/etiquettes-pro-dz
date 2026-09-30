@@ -1,0 +1,17 @@
+__pycache__/
+*.pyc
+*.pyo
+*.db
+*.db-journal
+*.db-wal
+*.db-shm
+data/*.db
+backups/*.zip
+backups/*.db
+output/*.pdf
+dist/
+build/
+*.spec.bak
+.venv/
+venv/
+.pytest_cache/

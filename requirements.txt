@@ -1,0 +1,10 @@
+# Dépendances 100% offline après installation (aucun appel réseau à l'exécution)
+reportlab>=4.0.0
+Pillow>=10.0.0
+python-barcode>=0.15.0
+qrcode>=7.4.2
+openpyxl>=3.1.0
+pyinstaller>=6.0.0 ; sys_platform == 'win32' or sys_platform == 'linux'
+# Windows impression (optionnel, fallback PDF si absent)
+pywin32>=306 ; sys_platform == 'win32'
+pytest>=8.0.0
