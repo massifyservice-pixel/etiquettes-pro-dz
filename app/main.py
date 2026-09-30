@@ -753,6 +753,11 @@ class App(tk.Tk):
         left = ttk.Frame(mid)
         left.pack(side="left", fill="both", expand=True)
         ttk.Label(left, text="Produits (Ctrl+clic = multi) — Qté par défaut 1, modifiable ci-dessous:").pack(anchor="w")
+        selbar = ttk.Frame(left)
+        selbar.pack(fill="x", pady=2)
+        ttk.Button(selbar, text="☑️ Tout sélectionner", command=self.tk_select_all).pack(side="left", padx=2)
+        ttk.Button(selbar, text="⬜ Tout désélectionner", command=self.tk_deselect_all).pack(side="left", padx=2)
+        ttk.Label(selbar, text="→ chaque ticket A4 aura un NOM + DATE différents", foreground="#065f46", font=("Segoe UI", 8, "bold")).pack(side="left", padx=10)
         self.tk_tree = ttk.Treeview(left, columns=("nom", "prix", "cb"), show="headings", selectmode="extended", height=12)
         for c, t, w in (("nom", "Produit", 260), ("prix", "Prix", 110), ("cb", "Code", 150)):
             self.tk_tree.heading(c, text=t)
@@ -783,6 +788,33 @@ class App(tk.Tk):
         ttk.Button(hb, text="🔄 Actualiser", command=self.refresh_tickets).pack(side="left", padx=4)
         ttk.Button(hb, text="👁️ Charger ticket", command=self.tk_load_selected).pack(side="left", padx=4)
         ttk.Button(hb, text="🖨️ Réimprimer (données originales)", command=self.tk_reprint_selected).pack(side="left", padx=4)
+        # ---- Planche A4 : MAX tickets au format réel, noms + dates tous différents ----
+        sheet = ttk.LabelFrame(f, text="Planche A4 — MAX tickets au format réel (chaque ticket = nom supérette + date DIFFÉRENTS)")
+        sheet.pack(fill="both", expand=True, pady=6)
+        sbar = ttk.Frame(sheet)
+        sbar.pack(fill="x", pady=3)
+        ttk.Label(sbar, text="Nb tickets:").pack(side="left", padx=4)
+        self.tk_sheet_n = ttk.Spinbox(sbar, from_=1, to=100, width=6)
+        self.tk_sheet_n.set("6")
+        self.tk_sheet_n.pack(side="left")
+        ttk.Label(sbar, text="/feuille:").pack(side="left", padx=(8, 2))
+        self.tk_sheet_per = ttk.Combobox(sbar, values=["6 (2x3 réel standard)", "4 (2x2 grand)", "8 (2x4 compact)"], width=22, state="readonly")
+        self.tk_sheet_per.set("6 (2x3 réel standard)")
+        self.tk_sheet_per.pack(side="left", padx=2)
+        ttk.Button(sbar, text="🚀 Générer planche A4 (noms+dates différents)", command=self.do_generate_ticket_sheet).pack(side="left", padx=8)
+        ttk.Button(sbar, text="◀", width=3, command=lambda: self._sheet_nav(-1)).pack(side="left", padx=2)
+        ttk.Button(sbar, text="▶", width=3, command=lambda: self._sheet_nav(1)).pack(side="left", padx=2)
+        self.tk_sheet_lbl = ttk.Label(sbar, text="Page 0/0")
+        self.tk_sheet_lbl.pack(side="left", padx=8)
+        ttk.Button(sbar, text="📄 Ouvrir PDF planche", command=lambda: self.do_open_pdf_path(getattr(self, "current_sheet_pdf", ""))).pack(side="left", padx=4)
+        ttk.Button(sbar, text="🖨️ Imprimer planche", command=self.do_print_sheet).pack(side="left", padx=4)
+        self.tk_sheet_canvas = tk.Canvas(sheet, bg="#6b7280", height=340)
+        self.tk_sheet_canvas.pack(fill="both", expand=True)
+        self.tk_sheet_info = ttk.Label(sheet, text="Astuce : sélectionnez TOUS les produits → 6 tickets → chaque case A4 = format ticket réel avec supérette et date différentes.",
+                                       foreground="#4b5563", font=("Segoe UI", 8))
+        self.tk_sheet_info.pack(anchor="w")
+        self._sheet_page = 0
+        self._sheet_tickets = []
 
     def tk_roll_shop(self):
         try:
@@ -1033,6 +1065,173 @@ class App(tk.Tk):
         self.notify(f"Réimpression ticket {t['numero']} préparée (job {new_id}, données originales).")
         if messagebox.askyesno("Réimpression", f"Ticket {t['numero']} : mêmes données originales.\nImprimer maintenant ?"):
             self.do_print_ticket()
+
+    def tk_select_all(self):
+        for iid in self.tk_tree.get_children():
+            self.tk_tree.selection_add(iid)
+        self.notify(f"{len(self.tk_tree.get_children())} produits sélectionnés.")
+
+    def tk_deselect_all(self):
+        self.tk_tree.selection_remove(self.tk_tree.selection())
+        self.notify("Sélection effacée.")
+
+    def _sheet_per_page(self):
+        txt = self.tk_sheet_per.get() if hasattr(self, "tk_sheet_per") else "6"
+        if txt.startswith("4"):
+            return 4
+        if txt.startswith("8"):
+            return 8
+        return 6
+
+    def do_generate_ticket_sheet(self):
+        sel = [self._tk_index[i] for i in self.tk_tree.selection() if i in getattr(self, "_tk_index", {})]
+        if not sel:
+            # aide : proposer tout sélectionner
+            if messagebox.askyesno("Vide", "Aucun produit sélectionné.\nTout sélectionner automatiquement ?"):
+                self.tk_select_all()
+                sel = [self._tk_index[i] for i in self.tk_tree.selection() if i in getattr(self, "_tk_index", {})]
+            if not sel:
+                return
+        try:
+            n = max(1, min(100, int(self.tk_sheet_n.get() or 6)))
+        except Exception:
+            n = 6
+        per_page = self._sheet_per_page()
+        try:
+            minus = int(self.tk_minus.get() or 1)
+            plus = int(self.tk_plus.get() or 1)
+        except Exception:
+            minus, plus = 1, 1
+        custom_shop = self.tk_shop_custom.get().strip()
+        # forcer noms+dates TOUS différents (pas le même sur la page A4)
+        shop_mode = self.tk_shop_mode.get()
+        force_different = True
+        quantites = self._tk_parse_quantities(sel)
+        prods = [self.db.get_product(pid) for pid in sel]
+        prods = [p for p in prods if p]
+        try:
+            if force_different or shop_mode.startswith("auto"):
+                ticket_ids = tickets_mod.generate_bulk_tickets(
+                    self.db, prods, quantites, n,
+                    shop_custom="" if shop_mode.startswith("auto") else custom_shop,
+                    minus=minus, plus=plus)
+            else:
+                # mode fixe/custom unique (cas rare) : même nom mais dates différentes quand même
+                shop = tickets_mod.pick_shop_name(self.db, "fixe" if shop_mode.startswith("fixe") else "custom", custom_shop)
+                dates = tickets_mod.varied_datetimes(self.db, n, minus, plus)
+                lignes = tickets_mod.build_lignes_from_products(prods, quantites)
+                ticket_ids = [self.db.create_ticket(lignes, shop, d) for d in dates]
+        except Exception as e:
+            messagebox.showerror("Génération planche", str(e))
+            return
+        # sheet ENREGISTRÉE avant impression
+        try:
+            sheet_id = self.db.create_ticket_sheet(ticket_ids, per_page, {"n": n})
+        except Exception as e:
+            messagebox.showerror("Planche", f"Échec sauvegarde avant impression:\n{e}")
+            return
+        tickets_list = [self.db.get_ticket(tid) for tid in ticket_ids]
+        self._sheet_tickets = tickets_list
+        self._sheet_page = 0
+        self._sheet_id = sheet_id
+        # PDF A4 maximal
+        outdir = self.db.get_setting("pdf_folder", "output")
+        if not os.path.isabs(outdir):
+            outdir = os.path.join(BASE_DIR, outdir)
+        os.makedirs(outdir, exist_ok=True)
+        pdf_path = os.path.join(outdir, f"planche-tickets-{sheet_id}.pdf")
+        try:
+            footer = self.db.get_setting("ticket_footer", "")
+            nb_pages, nb = ticket_pdf.build_tickets_a4_pdf(pdf_path, tickets_list, per_page, footer)
+        except Exception as e:
+            messagebox.showerror("PDF planche", str(e))
+            return
+        self.current_sheet_pdf = pdf_path
+        # job ENREGISTRE lié au premier ticket (traçabilité) + message planche
+        job_id = self.db.create_print_job(None, "", 1, "all", pdf_path, "ENREGISTRE",
+                                          f"Planche A4 {sheet_id}: {nb} tickets / {nb_pages} page(s), {per_page}/feuille, noms+dates différents",
+                                          ticket_id=ticket_ids[0])
+        self.current_ticket_job = job_id
+        self._draw_sheet_preview()
+        shops = [t.get("shop_name") for t in tickets_list[:per_page]]
+        self.tk_sheet_info.config(text=f"✅ Planche {sheet_id}: {nb} tickets → {nb_pages} page(s) A4 ({per_page}/feuille) | ex: {', '.join(shops[:3])}… | job {job_id}")
+        self.notify(f"Planche {sheet_id} enregistrée avant impression ({nb_pages} pages).")
+        self.refresh_tickets()
+
+    def _sheet_nav(self, d):
+        if not getattr(self, "_sheet_tickets", []):
+            return
+        per = self._sheet_per_page()
+        import math
+        nb_pages = max(1, math.ceil(len(self._sheet_tickets) / per))
+        self._sheet_page = max(0, min(self._sheet_page + d, nb_pages - 1))
+        self._draw_sheet_preview()
+
+    def _draw_sheet_preview(self):
+        cv = getattr(self, "tk_sheet_canvas", None)
+        if cv is None:
+            return
+        cv.delete("all")
+        tickets = getattr(self, "_sheet_tickets", []) or []
+        if not tickets:
+            cv.create_text(300, 150, text="Générez une planche : sélectionnez produits → Nb tickets → Générer", fill="white", font=("Arial", 10, "bold"))
+            if hasattr(self, "tk_sheet_lbl"):
+                self.tk_sheet_lbl.config(text="Page 0/0")
+            return
+        per = self._sheet_per_page()
+        import math
+        nb_pages = max(1, math.ceil(len(tickets) / per))
+        self._sheet_page = max(0, min(getattr(self, "_sheet_page", 0), nb_pages - 1))
+        if hasattr(self, "tk_sheet_lbl"):
+            self.tk_sheet_lbl.config(text=f"Page {self._sheet_page+1}/{nb_pages}")
+        # A4 proportionnelle
+        W, H = 560, 330
+        pw, ph = 210, 297
+        s = min(W / pw, H / ph)
+        dw, dh = pw * s, ph * s
+        x0, y0 = (W - dw) / 2 + 10, 8
+        cv.create_rectangle(x0, y0, x0 + dw, y0 + dh, fill="white", outline="black", width=2)
+        cols, rows = 2, per // 2
+        chunk = tickets[self._sheet_page * per:(self._sheet_page + 1) * per]
+        for idx, t in enumerate(chunk):
+            col, row = idx % cols, idx // cols
+            rx = x0 + 4 + col * (dw - 8) / cols
+            ry = y0 + 4 + row * (dh - 8) / rows
+            rw, rh = (dw - 8) / cols - 4, (dh - 8) / rows - 4
+            cv.create_rectangle(rx, ry, rx + rw, ry + rh, fill="white", outline="#111", width=1)
+            cv.create_text(rx + 4, ry + 4, text="✂", font=("Arial", 7), anchor="nw")
+            # format réel : boutique / N° / date / lignes / total
+            cv.create_text(rx + rw / 2, ry + 14, text=(t.get("shop_name", "")[:26].upper()), font=("Arial", 7, "bold"))
+            cv.create_text(rx + rw / 2, ry + 26, text="TICKET DE CAISSE", font=("Arial", 6, "bold"))
+            cv.create_text(rx + rw / 2, ry + 38, text=f"{t.get('numero','')}  {str(t.get('date_ticket',''))[0:16]}", font=("Arial", 6))
+            yy = ry + 50
+            for it in (t.get("items", [])[:3]):
+                s = it.get("snapshot", {}) or {}
+                nom = (s.get("nom") or "")[:18]
+                cv.create_text(rx + 6, yy, text=f"{nom} x{float(it.get('quantite',1)):g}", font=("Arial", 6), anchor="nw")
+                cv.create_text(rx + rw - 6, yy, text=f"{float(it.get('total_ligne',0)):,.0f}".replace(",", " "), font=("Arial", 6), anchor="ne")
+                yy += 11
+            if len(t.get("items", [])) > 3:
+                cv.create_text(rx + rw / 2, yy, text=f"… +{len(t['items'])-3}", font=("Arial", 6, "italic"))
+                yy += 11
+            cv.create_line(rx + 6, yy, rx + rw - 6, yy)
+            yy += 10
+            cv.create_text(rx + rw / 2, yy, text=f"TOTAL {float(t.get('total',0)):,.0f} DA".replace(",", " "), font=("Arial", 7, "bold"))
+        cv.create_text(x0 + dw / 2, y0 + dh + 10, text=f"Feuille A4 — {len(chunk)} tickets au format réel (noms + dates différents) — page {self._sheet_page+1}/{nb_pages}",
+                       fill="white", font=("Arial", 8, "bold"))
+
+    def do_print_sheet(self):
+        pdf = getattr(self, "current_sheet_pdf", "")
+        if not pdf or not os.path.exists(pdf):
+            messagebox.showwarning("Planche", "Générez d'abord une planche A4.")
+            return
+        printers = printing.list_printers()
+        pname = printing.get_default_printer() if printers else ""
+        ok, msg = printing.send_to_printer(pdf, pname, 1)
+        if getattr(self, "current_ticket_job", None):
+            self.db.update_print_job(self.current_ticket_job, "ENVOYE" if ok else "ECHEC", "Planche A4: " + msg)
+        messagebox.showinfo("Impression planche", f"{msg}\n\nStatut = {'ENVOYE (confirmez après sortie)' if ok else 'ECHEC (planche conservée)'}.\nImprimer à 100%.")
+        self.notify(msg, ok)
 
     # ================= IMPRESSION / APERÇU =================
     def _build_impression(self):

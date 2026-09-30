@@ -71,3 +71,38 @@ def test_ticket_pdf_and_save_before_print(tmp_path):
     j2 = db.reprint_job(jid, "")
     assert j2 != jid
     assert db.get_ticket(tid)["nb_lignes"] == 2
+
+def test_bulk_tickets_different_names_dates(tmp_path):
+    db = Database(str(tmp_path / "tk6.db"))
+    db.add_product({"nom": "A", "prix_vente": 100})
+    db.add_product({"nom": "B", "prix_vente": 200})
+    db.set_setting("ticket_shop_names", "S1;S2;S3;S4;S5;S6")
+    prods = db.list_products()
+    ids = T.generate_bulk_tickets(db, prods, None, 6, "", 1, 1)
+    assert len(ids) == 6
+    tickets = [db.get_ticket(i) for i in ids]
+    shops = [t["shop_name"] for t in tickets]
+    # jamais le même 2x de suite + tous uniques si assez de noms
+    assert all(a != b for a, b in zip(shops, shops[1:]))
+    assert len(set(shops)) == 6
+    assert len(set(t["numero"] for t in tickets)) == 6
+    # chaque ticket contient TOUS les produits
+    for t in tickets:
+        assert t["nb_lignes"] == 2
+
+def test_sheet_a4_max_pagination(tmp_path):
+    db = Database(str(tmp_path / "tk7.db"))
+    db.add_product({"nom": "A", "prix_vente": 50})
+    prods = db.list_products()
+    ids = T.generate_bulk_tickets(db, prods, None, 12, "", 1, 1)
+    sid = db.create_ticket_sheet(ids, 6, {})
+    s = db.get_ticket_sheet(sid)
+    assert s["nb_tickets"] == 12 and s["nb_pages"] == 2
+    tickets = [db.get_ticket(i) for i in ids]
+    pdf = str(tmp_path / "planche.pdf")
+    pages, nb = ticket_pdf.build_tickets_a4_pdf(pdf, tickets, 6, "Merci")
+    assert (pages, nb) == (2, 12)
+    assert os.path.exists(pdf)
+    pdf2 = str(tmp_path / "planche4.pdf")
+    pages2, _ = ticket_pdf.build_tickets_a4_pdf(pdf2, tickets[:4], 4, "")
+    assert pages2 == 1

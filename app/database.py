@@ -124,6 +124,17 @@ CREATE TABLE IF NOT EXISTS ticket_items (
 );
 CREATE INDEX IF NOT EXISTS idx_ticket_items_ticket ON ticket_items(ticket_id);
 
+CREATE TABLE IF NOT EXISTS ticket_sheets (
+    id TEXT PRIMARY KEY,
+    created_at TEXT NOT NULL,
+    nb_tickets INTEGER DEFAULT 0,
+    nb_pages INTEGER DEFAULT 0,
+    per_page INTEGER DEFAULT 6,
+    ticket_ids_json TEXT DEFAULT '[]',
+    statut TEXT DEFAULT 'ENREGISTRE',
+    params_json TEXT DEFAULT '{}'
+);
+
 CREATE TABLE IF NOT EXISTS settings (
     cle TEXT PRIMARY KEY,
     valeur TEXT NOT NULL
@@ -645,6 +656,41 @@ class Database:
         params.append(limit)
         with self.tx() as con:
             return [dict(r) for r in con.execute(q, params).fetchall()]
+
+    # ---------- planches A4 de tickets : N tickets différents, max par feuille ----------
+    def create_ticket_sheet(self, ticket_ids, per_page=6, params=None):
+        """Enregistre une planche AVANT impression : N tickets déjà créés -> 1 sheet + pagination auto."""
+        if not ticket_ids:
+            raise ValueError("Aucun ticket pour la planche.")
+        per_page = max(1, min(12, int(per_page or 6)))
+        import math
+        nb = len(ticket_ids)
+        sid = uuid.uuid4().hex[:12]
+        with self.tx() as con:
+            con.execute("INSERT INTO ticket_sheets(id,created_at,nb_tickets,nb_pages,per_page,ticket_ids_json,statut,params_json) VALUES (?,?,?,?,?,?,?,?)",
+                        (sid, _now(), nb, math.ceil(nb / per_page), per_page,
+                         json.dumps(ticket_ids, ensure_ascii=False), "ENREGISTRE",
+                         json.dumps(params or {}, ensure_ascii=False)))
+        return sid
+
+    def get_ticket_sheet(self, sheet_id):
+        with self.tx() as con:
+            s = con.execute("SELECT * FROM ticket_sheets WHERE id=?", (sheet_id,)).fetchone()
+            if not s:
+                return None
+            d = dict(s)
+            try:
+                d["ticket_ids"] = json.loads(d.get("ticket_ids_json", "[]"))
+            except Exception:
+                d["ticket_ids"] = []
+            return d
+
+    def list_ticket_sheets(self, limit=100):
+        with self.tx() as con:
+            try:
+                return [dict(r) for r in con.execute("SELECT * FROM ticket_sheets ORDER BY created_at DESC LIMIT ?", (limit,)).fetchall()]
+            except Exception:
+                return []
 
     def dashboard_stats(self):
         with self.tx() as con:
