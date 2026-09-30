@@ -11,6 +11,8 @@ from . import pdf_labels
 from . import printing
 from . import backup as backup_mod
 from . import importer as importer_mod
+from . import tickets as tickets_mod
+from . import ticket_pdf
 
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
@@ -20,6 +22,7 @@ NAV = [
     ("ajouter", "➕ Ajouter"),
     ("barcodes", "🔖 Codes-barres"),
     ("etiquettes", "🏷️ Étiquettes"),
+    ("tickets", "🧾 Tickets"),
     ("impression", "🖨️ Impression"),
     ("historique", "🕘 Historique"),
     ("modeles", "🎨 Modèles"),
@@ -55,6 +58,9 @@ class App(tk.Tk):
         self.current_batch = None
         self.current_pdf = ""
         self.current_job = None
+        self.current_ticket = None
+        self.current_ticket_pdf = ""
+        self.current_ticket_job = None
         self.preview_page = 0
         self.zoom = 0.85
         self._setup_style()
@@ -122,6 +128,7 @@ class App(tk.Tk):
         self._build_ajouter()
         self._build_barcodes()
         self._build_etiquettes()
+        self._build_tickets()
         self._build_impression()
         self._build_historique()
         self._build_modeles()
@@ -138,6 +145,7 @@ class App(tk.Tk):
             b.config(bg="#374151" if k == key else "#1f2937")
         refresh = {"dashboard": self.refresh_dashboard, "produits": self.refresh_products,
                    "barcodes": self.refresh_bc_products, "etiquettes": self.refresh_gen_products,
+                   "tickets": self.refresh_tickets,
                    "historique": self.refresh_history, "modeles": self.refresh_templates}
         if key in refresh:
             try:
@@ -173,7 +181,8 @@ class App(tk.Tk):
         self.dash_cards.pack(fill="x")
         self.dash_vals = {}
         for i, (k, label) in enumerate([("produits", "Produits"), ("barcodes", "Codes-barres"),
-                                        ("etiquettes", "Étiquettes générées"), ("imprimes", "Imprimés"),
+                                        ("etiquettes", "Étiquettes générées"), ("tickets", "Tickets"),
+                                        ("imprimes", "Imprimés"),
                                         ("echecs", "Échecs")]):
             card = ttk.Frame(self.dash_cards, style="Card.TFrame", padding=12)
             card.grid(row=0, column=i, padx=6, sticky="ew")
@@ -697,6 +706,334 @@ class App(tk.Tk):
             self.show_page("impression")
             self.refresh_print_page()
 
+    # ================= TICKETS DE CAISSE : UN SEUL TICKET = TOUS LES PRODUITS =================
+    def _build_tickets(self):
+        f = self.pages["tickets"]
+        tk.Label(f, text="Tickets de caisse — TOUS les produits dans UN seul ticket", font=("Segoe UI", 16, "bold")).pack(anchor="w")
+        ttk.Label(f, text="Sélectionnez N produits → 1 seul ticket (pas 1 ticket par produit). Nom boutique + date aléatoires et customisables.",
+                  foreground="#4b5563").pack(anchor="w")
+        opt = ttk.LabelFrame(f, text="Options ticket (nom aléatoire customisable + date -1/+1 modifiable)")
+        opt.pack(fill="x", pady=6)
+        # ligne 1 : boutique
+        r1 = ttk.Frame(opt)
+        r1.pack(fill="x", pady=2)
+        ttk.Label(r1, text="Boutique:").pack(side="left", padx=4)
+        self.tk_shop_mode = ttk.Combobox(r1, values=["auto (aléatoire)", "fixe", "custom"], width=16, state="readonly")
+        self.tk_shop_mode.set("auto (aléatoire)")
+        self.tk_shop_mode.pack(side="left", padx=4)
+        self.tk_shop_custom = ttk.Entry(r1, width=32)
+        self.tk_shop_custom.pack(side="left", padx=4)
+        self.tk_shop_custom.insert(0, "")
+        ttk.Label(r1, text="Liste (Paramètres):").pack(side="left", padx=(10, 2))
+        self.tk_shop_preview = ttk.Label(r1, text="", foreground="#065f46", font=("Segoe UI", 9, "bold"))
+        self.tk_shop_preview.pack(side="left", padx=4)
+        ttk.Button(r1, text="🎲 Tirer nom", command=self.tk_roll_shop).pack(side="left", padx=6)
+        # ligne 2 : date
+        r2 = ttk.Frame(opt)
+        r2.pack(fill="x", pady=2)
+        ttk.Label(r2, text="Date:").pack(side="left", padx=4)
+        self.tk_date_mode = ttk.Combobox(r2, values=["auto (aléatoire -1/+1)", "now (maintenant)", "custom"], width=22, state="readonly")
+        self.tk_date_mode.set("auto (aléatoire -1/+1)")
+        self.tk_date_mode.pack(side="left", padx=4)
+        self.tk_date_custom = ttk.Entry(r2, width=20)
+        self.tk_date_custom.pack(side="left", padx=4)
+        self.tk_date_custom.insert(0, datetime.now().strftime("%Y-%m-%d %H:%M"))
+        ttk.Label(r2, text="-jours:").pack(side="left", padx=(8, 2))
+        self.tk_minus = ttk.Spinbox(r2, from_=0, to=30, width=4)
+        self.tk_minus.pack(side="left")
+        ttk.Label(r2, text="+jours:").pack(side="left", padx=(8, 2))
+        self.tk_plus = ttk.Spinbox(r2, from_=0, to=30, width=4)
+        self.tk_plus.pack(side="left")
+        ttk.Button(r2, text="🎲 Tirer date", command=self.tk_roll_date).pack(side="left", padx=6)
+        self.tk_result_lbl = ttk.Label(opt, text="Nom: — | Date: —", font=("Segoe UI", 10, "bold"))
+        self.tk_result_lbl.pack(anchor="w", padx=4, pady=2)
+        # produits
+        mid = ttk.Frame(f)
+        mid.pack(fill="both", expand=True, pady=4)
+        left = ttk.Frame(mid)
+        left.pack(side="left", fill="both", expand=True)
+        ttk.Label(left, text="Produits (Ctrl+clic = multi) — Qté par défaut 1, modifiable ci-dessous:").pack(anchor="w")
+        self.tk_tree = ttk.Treeview(left, columns=("nom", "prix", "cb"), show="headings", selectmode="extended", height=12)
+        for c, t, w in (("nom", "Produit", 260), ("prix", "Prix", 110), ("cb", "Code", 150)):
+            self.tk_tree.heading(c, text=t)
+            self.tk_tree.column(c, width=w)
+        self.tk_tree.pack(fill="both", expand=True)
+        right = ttk.Frame(mid, width=360)
+        right.pack(side="right", fill="y", padx=(8, 0))
+        right.pack_propagate(False)
+        ttk.Label(right, text="Quantités (une ligne par produit : nom=qté):", font=("Segoe UI", 9, "bold")).pack(anchor="w")
+        self.tk_qty_text = tk.Text(right, height=8, width=40)
+        self.tk_qty_text.pack(fill="x")
+        ttk.Label(right, text="Ex:\nProduit XYZ=2\nAutre=1", foreground="#6b7280", font=("Segoe UI", 8)).pack(anchor="w")
+        ttk.Button(right, text="🚀 Générer UN ticket + Enregistrer (avant impression)", command=self.do_generate_ticket).pack(fill="x", pady=6)
+        ttk.Button(right, text="🖨️ Imprimer ticket actuel", command=self.do_print_ticket).pack(fill="x", pady=2)
+        ttk.Button(right, text="📄 Ouvrir PDF ticket", command=lambda: self.do_open_pdf_path(getattr(self, "current_ticket_pdf", ""))).pack(fill="x", pady=2)
+        self.tk_preview = tk.Text(f, height=9, font=("Courier", 9), bg="#111827", fg="#e5e7eb")
+        self.tk_preview.pack(fill="x", pady=4)
+        # historique tickets
+        ttk.Label(f, text="Tickets enregistrés (réimpression = mêmes données originales):", font=("Segoe UI", 10, "bold")).pack(anchor="w")
+        self.tk_hist = ttk.Treeview(f, columns=("numero", "shop", "date", "nbl", "total"), show="headings", height=6)
+        for c, t, w in (("numero", "N°", 150), ("shop", "Boutique", 220), ("date", "Date ticket", 150),
+                        ("nbl", "Lignes", 70), ("total", "Total", 110)):
+            self.tk_hist.heading(c, text=t)
+            self.tk_hist.column(c, width=w)
+        self.tk_hist.pack(fill="both", expand=True)
+        hb = ttk.Frame(f)
+        hb.pack(fill="x", pady=3)
+        ttk.Button(hb, text="🔄 Actualiser", command=self.refresh_tickets).pack(side="left", padx=4)
+        ttk.Button(hb, text="👁️ Charger ticket", command=self.tk_load_selected).pack(side="left", padx=4)
+        ttk.Button(hb, text="🖨️ Réimprimer (données originales)", command=self.tk_reprint_selected).pack(side="left", padx=4)
+
+    def tk_roll_shop(self):
+        try:
+            names = tickets_mod.shop_name_list(self.db)
+            import random as _r
+            name = _r.choice(names)
+            self.tk_shop_preview.config(text=" / ".join(names[:3]) + (" …" if len(names) > 3 else ""))
+            self.tk_result_lbl.config(text=f"Nom: {name} | Date: {self.tk_result_lbl.cget('text').split('| Date: ')[-1] if '| Date:' in self.tk_result_lbl.cget('text') else '—'}")
+            self._tk_last_shop = name
+            self.notify(f"Boutique tirée: {name}")
+        except Exception as e:
+            messagebox.showerror("Erreur", str(e))
+
+    def tk_roll_date(self):
+        try:
+            minus = int(self.tk_minus.get() or self.db.get_setting("ticket_date_minus", "1"))
+            plus = int(self.tk_plus.get() or self.db.get_setting("ticket_date_plus", "1"))
+        except Exception:
+            minus, plus = 1, 1
+        dt = tickets_mod.random_ticket_datetime(self.db, minus, plus)
+        self.tk_date_custom.delete(0, "end")
+        self.tk_date_custom.insert(0, dt.replace("T", " "))
+        cur = self.tk_result_lbl.cget("text").split(" | ")[0] if " | " in self.tk_result_lbl.cget("text") else "Nom: —"
+        self.tk_result_lbl.config(text=f"{cur} | Date: {dt}")
+        self._tk_last_date = dt
+        self.notify(f"Date tirée: {dt} (plage -{minus}/+{plus}j)")
+
+    def refresh_tickets(self):
+        rows = self.db.list_products(limit=5000)
+        self._tk_list = rows
+        self.tk_tree.delete(*self.tk_tree.get_children())
+        self._tk_index = {}
+        for r in rows:
+            iid = self.tk_tree.insert("", "end", values=(r["nom"], fmt_dzd(r["prix_vente"]), r.get("code_barres", "")))
+            self._tk_index[iid] = r["id"]
+        # bornes date depuis paramètres
+        try:
+            self.tk_minus.set(self.db.get_setting("ticket_date_minus", "1"))
+            self.tk_plus.set(self.db.get_setting("ticket_date_plus", "1"))
+        except Exception:
+            pass
+        # historique
+        self.tk_hist.delete(*self.tk_hist.get_children())
+        self._tk_hist_index = {}
+        for t in self.db.list_tickets(limit=200):
+            iid = self.tk_hist.insert("", "end", values=(t["numero"], t["shop_name"], t["date_ticket"], t["nb_lignes"], fmt_dzd(t["total"])))
+            self._tk_hist_index[iid] = t["id"]
+        if not hasattr(self, "_tk_last_shop"):
+            self._tk_last_shop = tickets_mod.pick_shop_name(self.db, "auto")
+            self._tk_last_date = tickets_mod.random_ticket_datetime(self.db)
+            self.tk_result_lbl.config(text=f"Nom: {self._tk_last_shop} | Date: {self._tk_last_date}")
+
+    def _tk_parse_quantities(self, selected_ids):
+        # format lignes "nom=qté" ou "nom:qté" ; sinon 1
+        txt = self.tk_qty_text.get("1.0", "end").strip()
+        qmap = {}
+        if txt:
+            prod_by_nom = {p["nom"]: p["id"] for p in getattr(self, "_tk_list", [])}
+            for ln in txt.splitlines():
+                ln = ln.strip()
+                if not ln or "=" not in ln and ":" not in ln:
+                    continue
+                sep = "=" if "=" in ln else ":"
+                nom, q = ln.split(sep, 1)
+                nom, q = nom.strip(), q.strip().replace(",", ".")
+                pid = prod_by_nom.get(nom)
+                if pid and pid in selected_ids:
+                    try:
+                        qmap[pid] = float(q) if float(q) > 0 else 1
+                    except Exception:
+                        pass
+        return {pid: qmap.get(pid, 1) for pid in selected_ids}
+
+    def do_generate_ticket(self):
+        sel = [self._tk_index[i] for i in self.tk_tree.selection() if i in getattr(self, "_tk_index", {})]
+        if not sel:
+            messagebox.showwarning("Sélection", "Sélectionnez au moins un produit — ils iront TOUS dans UN seul ticket.")
+            return
+        # boutique
+        shop_mode_raw = self.tk_shop_mode.get()
+        shop_mode = "custom" if shop_mode_raw.startswith("custom") else ("fixe" if shop_mode_raw.startswith("fixe") else "auto")
+        custom_shop = self.tk_shop_custom.get().strip()
+        # si custom vide et mode custom -> tirer aléatoire tout de même (jamais bloquer)
+        shop = tickets_mod.pick_shop_name(self.db, shop_mode, custom_shop) if not (shop_mode == "custom" and not custom_shop) else getattr(self, "_tk_last_shop", custom_shop or "Mon Commerce")
+        if hasattr(self, "_tk_last_shop") and shop_mode == "auto" and not custom_shop:
+            # utiliser le dernier tirage si l'utilisateur a cliqué "Tirer nom", sinon nouveau tirage
+            shop = getattr(self, "_tk_last_shop", shop)
+        # date
+        date_mode_raw = self.tk_date_mode.get()
+        date_mode = "custom" if date_mode_raw.startswith("custom") else ("now" if date_mode_raw.startswith("now") else "auto")
+        try:
+            minus = int(self.tk_minus.get() or 1)
+            plus = int(self.tk_plus.get() or 1)
+        except Exception:
+            minus, plus = 1, 1
+        # persiste la plage modifiable
+        try:
+            self.db.set_setting("ticket_date_minus", str(minus))
+            self.db.set_setting("ticket_date_plus", str(plus))
+        except Exception:
+            pass
+        custom_date = self.tk_date_custom.get().strip()
+        try:
+            if date_mode == "auto" and hasattr(self, "_tk_last_date"):
+                date_ticket = self._tk_last_date
+            else:
+                date_ticket = tickets_mod.resolve_ticket_datetime(self.db, date_mode, custom_date, minus, plus)
+        except Exception as e:
+            messagebox.showerror("Date", str(e))
+            return
+        quantites = self._tk_parse_quantities(sel)
+        prods = [self.db.get_product(pid) for pid in sel]
+        prods = [p for p in prods if p]
+        lignes = tickets_mod.build_lignes_from_products(prods, quantites)
+        # 1. ENREGISTRER EN SQLite AVANT impression (règle critique, comme étiquettes)
+        try:
+            ticket_id = self.db.create_ticket(lignes, shop, date_ticket, {"minus": minus, "plus": plus})
+        except Exception as e:
+            messagebox.showerror("Enregistrement", f"Échec sauvegarde avant impression:\n{e}")
+            return
+        ticket = self.db.get_ticket(ticket_id)
+        # 2. PDF 80mm
+        outdir = self.db.get_setting("pdf_folder", "output")
+        if not os.path.isabs(outdir):
+            outdir = os.path.join(BASE_DIR, outdir)
+        os.makedirs(outdir, exist_ok=True)
+        pdf_path = os.path.join(outdir, f"ticket-{ticket['numero'].replace('/','-')}.pdf")
+        try:
+            footer = self.db.get_setting("ticket_footer", "")
+            try:
+                wmm = float(self.db.get_setting("ticket_width_mm", "80") or 80)
+            except Exception:
+                wmm = 80
+            ticket_pdf.build_ticket_pdf(pdf_path, ticket, footer, wmm)
+        except Exception as e:
+            messagebox.showerror("PDF", str(e))
+            return
+        # 3. job ENREGISTRE (pas IMPRIME)
+        job_id = self.db.create_print_job(None, "", 1, "all", pdf_path, "ENREGISTRE",
+                                          f"Ticket {ticket['numero']} : {len(lignes)} lignes, total {ticket['total']} DA",
+                                          ticket_id=ticket_id)
+        self.current_ticket = ticket_id
+        self.current_ticket_pdf = pdf_path
+        self.current_ticket_job = job_id
+        # aperçu texte
+        self.tk_preview.delete("1.0", "end")
+        self.tk_preview.insert("1.0", tickets_mod.preview_text(ticket) + f"\n\nPDF: {pdf_path}\nJob: {job_id} (ENREGISTRE avant impression)")
+        self.refresh_tickets()
+        self.notify(f"Ticket unique {ticket['numero']} enregistré ({len(lignes)} produits, total {ticket['total']} DA).")
+        if messagebox.askyesno("Ticket enregistré",
+                               f"UN seul ticket {ticket['numero']}\n{shop}\n{date_ticket}\n{len(lignes)} lignes — Total {fmt_dzd(ticket['total'])}\n\nImprimer maintenant ?"):
+            self.do_print_ticket()
+
+    def do_print_ticket(self):
+        pdf = getattr(self, "current_ticket_pdf", "")
+        if not pdf or not os.path.exists(pdf):
+            # reprendre dernier ticket
+            hist = self.db.list_tickets(limit=1)
+            if not hist:
+                messagebox.showwarning("Ticket", "Générez d'abord un ticket.")
+                return
+            t = self.db.get_ticket(hist[0]["id"])
+            outdir = self.db.get_setting("pdf_folder", "output")
+            if not os.path.isabs(outdir):
+                outdir = os.path.join(BASE_DIR, outdir)
+            pdf = os.path.join(outdir, f"ticket-{t['numero'].replace('/','-')}.pdf")
+            if not os.path.exists(pdf):
+                ticket_pdf.build_ticket_pdf(pdf, t, self.db.get_setting("ticket_footer", ""))
+            self.current_ticket = t["id"]
+            self.current_ticket_pdf = pdf
+            jobs = self.db.list_print_jobs(limit=100)
+            for j in jobs:
+                if j.get("ticket_id") == t["id"]:
+                    self.current_ticket_job = j["id"]
+                    break
+        # imprimante par défaut
+        printers = printing.list_printers()
+        pname = printing.get_default_printer() if printers else ""
+        ok, msg = printing.send_to_printer(pdf, pname, 1)
+        if getattr(self, "current_ticket_job", None):
+            self.db.update_print_job(self.current_ticket_job, "ENVOYE" if ok else "ECHEC", msg)
+        else:
+            self.current_ticket_job = self.db.create_print_job(None, pname, 1, "all", pdf,
+                                                               "ENVOYE" if ok else "ECHEC", msg,
+                                                               ticket_id=getattr(self, "current_ticket", None))
+        messagebox.showinfo("Impression ticket",
+                            f"{msg}\n\nStatut = {'ENVOYE (confirmez IMPRIME après sortie papier)' if ok else 'ECHEC (ticket conservé, réimprimable)'}.")
+        self.notify(msg, ok)
+
+    def do_open_pdf_path(self, path):
+        import subprocess, platform as _p
+        if not path or not os.path.exists(path):
+            messagebox.showwarning("PDF", "Aucun PDF.")
+            return
+        try:
+            if _p.system() == "Windows":
+                os.startfile(path)  # noqa
+            elif _p.system() == "Darwin":
+                subprocess.Popen(["open", path])
+            else:
+                subprocess.Popen(["xdg-open", path])
+        except Exception as e:
+            messagebox.showerror("Ouverture", str(e))
+
+    def tk_load_selected(self):
+        sel = self.tk_hist.selection()
+        if not sel or sel[0] not in getattr(self, "_tk_hist_index", {}):
+            messagebox.showwarning("Sélection", "Sélectionnez un ticket.")
+            return
+        tid = self._tk_hist_index[sel[0]]
+        t = self.db.get_ticket(tid)
+        self.current_ticket = tid
+        self.tk_preview.delete("1.0", "end")
+        self.tk_preview.insert("1.0", tickets_mod.preview_text(t))
+        # régénérer/retrouver PDF
+        outdir = self.db.get_setting("pdf_folder", "output")
+        if not os.path.isabs(outdir):
+            outdir = os.path.join(BASE_DIR, outdir)
+        pdf = os.path.join(outdir, f"ticket-{t['numero'].replace('/','-')}.pdf")
+        if not os.path.exists(pdf):
+            ticket_pdf.build_ticket_pdf(pdf, t, self.db.get_setting("ticket_footer", ""))
+        self.current_ticket_pdf = pdf
+        self.notify(f"Ticket {t['numero']} chargé.")
+
+    def tk_reprint_selected(self):
+        sel = self.tk_hist.selection()
+        if not sel or sel[0] not in getattr(self, "_tk_hist_index", {}):
+            messagebox.showwarning("Sélection", "Sélectionnez un ticket à réimprimer.")
+            return
+        tid = self._tk_hist_index[sel[0]]
+        # trouver un job existant pour ce ticket, sinon en créer un
+        jobs = self.db.list_print_jobs(limit=2000)
+        old = next((j for j in jobs if j.get("ticket_id") == tid), None)
+        if old:
+            new_id = self.db.reprint_job(old["id"], "")
+        else:
+            new_id = self.db.create_print_job(None, "", 1, "all", getattr(self, "current_ticket_pdf", ""),
+                                              "ENREGISTRE", f"Réimpression ticket {tid}", ticket_id=tid)
+        self.current_ticket = tid
+        self.current_ticket_job = new_id
+        t = self.db.get_ticket(tid)
+        outdir = self.db.get_setting("pdf_folder", "output")
+        if not os.path.isabs(outdir):
+            outdir = os.path.join(BASE_DIR, outdir)
+        pdf = os.path.join(outdir, f"ticket-{t['numero'].replace('/','-')}.pdf")
+        ticket_pdf.build_ticket_pdf(pdf, t, self.db.get_setting("ticket_footer", ""))
+        self.current_ticket_pdf = pdf
+        self.notify(f"Réimpression ticket {t['numero']} préparée (job {new_id}, données originales).")
+        if messagebox.askyesno("Réimpression", f"Ticket {t['numero']} : mêmes données originales.\nImprimer maintenant ?"):
+            self.do_print_ticket()
+
     # ================= IMPRESSION / APERÇU =================
     def _build_impression(self):
         f = self.pages["impression"]
@@ -1136,6 +1473,11 @@ class App(tk.Tk):
         srow("Espacement V (mm)", "esp_v_mm", 4)
         srow("Échelle", "echelle", 5)
         srow("Dossier PDF", "pdf_folder", 6)
+        srow("Noms boutiques tickets (; séparateur)", "ticket_shop_names", 7)
+        srow("Ticket date -jours (défaut 1)", "ticket_date_minus", 8)
+        srow("Ticket date +jours (défaut 1)", "ticket_date_plus", 9)
+        srow("Ticket largeur mm (80 thermique)", "ticket_width_mm", 10)
+        srow("Ticket pied de page", "ticket_footer", 11)
         ttk.Button(f, text="💾 Enregistrer paramètres", command=self.save_settings).pack(anchor="w", pady=6)
         ttk.Label(f, text="Calibration : imprimez la page de test (onglet Impression → Page de test), mesurez au réglet, "
                           "ajustez marges/espacements ici, réimprimez jusqu'à alignement parfait. 100% offline.",
@@ -1145,7 +1487,8 @@ class App(tk.Tk):
         try:
             for k, e in self.set_entries.items():
                 v = e.get().strip()
-                if k in ("marge_gauche_mm", "marge_haut_mm", "esp_h_mm", "esp_v_mm", "echelle"):
+                if k in ("marge_gauche_mm", "marge_haut_mm", "esp_h_mm", "esp_v_mm", "echelle",
+                         "ticket_date_minus", "ticket_date_plus", "ticket_width_mm"):
                     float(v.replace(",", "."))  # validation
                 self.db.set_setting(k, v)
             self.notify("Paramètres enregistrés.")

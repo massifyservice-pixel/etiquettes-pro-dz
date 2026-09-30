@@ -87,6 +87,7 @@ CREATE TABLE IF NOT EXISTS label_items (
 CREATE TABLE IF NOT EXISTS print_jobs (
     id TEXT PRIMARY KEY,
     batch_id TEXT REFERENCES label_batches(id) ON DELETE SET NULL,
+    ticket_id TEXT,
     printer_name TEXT DEFAULT '',
     copies INTEGER DEFAULT 1,
     pages TEXT DEFAULT 'all',
@@ -97,6 +98,31 @@ CREATE TABLE IF NOT EXISTS print_jobs (
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL
 );
+
+CREATE TABLE IF NOT EXISTS tickets (
+    id TEXT PRIMARY KEY,
+    numero TEXT NOT NULL UNIQUE,
+    shop_name TEXT NOT NULL DEFAULT '',
+    date_ticket TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    nb_lignes INTEGER DEFAULT 0,
+    total REAL DEFAULT 0,
+    statut TEXT DEFAULT 'ENREGISTRE',
+    params_json TEXT DEFAULT '{}'
+);
+CREATE INDEX IF NOT EXISTS idx_tickets_numero ON tickets(numero);
+CREATE INDEX IF NOT EXISTS idx_tickets_date ON tickets(date_ticket);
+
+CREATE TABLE IF NOT EXISTS ticket_items (
+    id TEXT PRIMARY KEY,
+    ticket_id TEXT NOT NULL REFERENCES tickets(id) ON DELETE CASCADE,
+    product_id TEXT REFERENCES products(id) ON DELETE SET NULL,
+    snapshot_json TEXT NOT NULL,
+    quantite REAL DEFAULT 1,
+    prix_unitaire REAL DEFAULT 0,
+    total_ligne REAL DEFAULT 0
+);
+CREATE INDEX IF NOT EXISTS idx_ticket_items_ticket ON ticket_items(ticket_id);
 
 CREATE TABLE IF NOT EXISTS settings (
     cle TEXT PRIMARY KEY,
@@ -155,6 +181,14 @@ DEFAULT_SETTINGS = {
     "backup_interval_min": "60",
     "backup_folder": "backups",
     "pdf_folder": "output",
+    # --- Tickets de caisse : 1 ticket = tous les produits ---
+    "ticket_shop_names": "Supérette El Baraka;Mini Market Nour;Épicerie Centrale;Bureau Tabac El Yasmine;Superette Essalem",
+    "ticket_random_shop": "1",
+    "ticket_random_date": "1",
+    "ticket_date_minus": "1",
+    "ticket_date_plus": "1",
+    "ticket_width_mm": "80",
+    "ticket_footer": "Merci de votre visite ! Paiement espèces — DZD",
 }
 
 STATUTS = ("GENERE", "ENREGISTRE", "ENVOYE", "IMPRIME", "ECHEC", "A_REIMPRIMER")
@@ -200,6 +234,13 @@ class Database:
     def _init(self):
         with self.tx() as con:
             con.executescript(SCHEMA)
+            # migration douce : anciennes bases sans ticket_id
+            try:
+                cols = [r[1] for r in con.execute("PRAGMA table_info(print_jobs)").fetchall()]
+                if "ticket_id" not in cols:
+                    con.execute("ALTER TABLE print_jobs ADD COLUMN ticket_id TEXT")
+            except Exception:
+                pass
             for t in DEFAULT_TEMPLATES:
                 con.execute(
                     """INSERT OR IGNORE INTO templates
@@ -454,13 +495,13 @@ class Database:
                 (limit,)).fetchall()]
 
     # ---------- print jobs / historique ----------
-    def create_print_job(self, batch_id, printer_name="", copies=1, pages="all", pdf_path="", statut="ENREGISTRE", message=""):
+    def create_print_job(self, batch_id=None, printer_name="", copies=1, pages="all", pdf_path="", statut="ENREGISTRE", message="", ticket_id=None):
         jid = uuid.uuid4().hex[:12]
         now = _now()
         with self.tx() as con:
             con.execute(
-                "INSERT INTO print_jobs(id,batch_id,printer_name,copies,pages,statut,message,pdf_path,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?)",
-                (jid, batch_id, printer_name, copies, pages, statut, message, pdf_path, now, now))
+                "INSERT INTO print_jobs(id,batch_id,ticket_id,printer_name,copies,pages,statut,message,pdf_path,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+                (jid, batch_id, ticket_id, printer_name, copies, pages, statut, message, pdf_path, now, now))
         return jid
 
     def update_print_job(self, jid, statut, message=""):
@@ -469,30 +510,33 @@ class Database:
                         (statut, message, _now(), jid))
 
     def reprint_job(self, old_jid, printer_name="", copies=1):
-        """Réimpression : ne crée PAS un nouveau batch, seulement un nouveau print_job lié (reprint_of)."""
+        """Réimpression : ne crée PAS un nouveau batch/ticket, seulement un nouveau print_job lié (reprint_of)."""
         with self.tx() as con:
             old = con.execute("SELECT * FROM print_jobs WHERE id=?", (old_jid,)).fetchone()
             if not old:
                 raise ValueError("Tâche d'impression introuvable.")
             old = dict(old)
-        new_id = self.create_print_job(old["batch_id"], printer_name, copies, old["pages"],
-                                       old.get("pdf_path", ""), "ENREGISTRE", f"Réimpression de {old_jid}")
+        new_id = self.create_print_job(old.get("batch_id"), printer_name, copies, old.get("pages", "all"),
+                                       old.get("pdf_path", ""), "ENREGISTRE", f"Réimpression de {old_jid}",
+                                       ticket_id=old.get("ticket_id"))
         with self.tx() as con:
             con.execute("UPDATE print_jobs SET reprint_of=? WHERE id=?", (old_jid, new_id))
         return new_id
 
     def list_print_jobs(self, search="", statut="", limit=500):
-        q = """SELECT j.*, b.nb_etiquettes, b.created_at as batch_date, t.nom as template_nom
+        q = """SELECT j.*, b.nb_etiquettes, b.created_at as batch_date, t.nom as template_nom,
+                      tk.numero as ticket_numero, tk.shop_name as ticket_shop, tk.total as ticket_total
                FROM print_jobs j LEFT JOIN label_batches b ON b.id=j.batch_id
-               LEFT JOIN templates t ON t.id=b.template_id WHERE 1=1"""
+               LEFT JOIN templates t ON t.id=b.template_id
+               LEFT JOIN tickets tk ON tk.id=j.ticket_id WHERE 1=1"""
         params = []
         if statut:
             q += " AND j.statut=?"
             params.append(statut)
         if search:
-            q += " AND (j.printer_name LIKE ? OR j.id LIKE ? OR j.message LIKE ?)"
+            q += " AND (j.printer_name LIKE ? OR j.id LIKE ? OR j.message LIKE ? OR tk.numero LIKE ? OR tk.shop_name LIKE ?)"
             s = f"%{search}%"
-            params += [s, s, s]
+            params += [s, s, s, s, s]
         q += " ORDER BY j.created_at DESC LIMIT ?"
         params.append(limit)
         with self.tx() as con:
@@ -501,8 +545,9 @@ class Database:
             for j in jobs:
                 c = con.execute("SELECT COUNT(*) c FROM print_jobs WHERE reprint_of=?", (j["id"],)).fetchone()["c"]
                 j["nb_reprints"] = c
+                j["type"] = "TICKET" if j.get("ticket_id") else "ETIQUETTES"
                 # premier produit du batch pour affichage
-                if j["batch_id"]:
+                if j.get("batch_id"):
                     it = con.execute("SELECT snapshot_json FROM label_items WHERE batch_id=? LIMIT 1",
                                      (j["batch_id"],)).fetchone()
                     if it:
@@ -513,7 +558,93 @@ class Database:
                             j["prix"] = snap.get("prix", "")
                         except Exception:
                             pass
+                elif j.get("ticket_id"):
+                    j["produit"] = f"Ticket {j.get('ticket_numero','')} ({j.get('ticket_shop','')})"
+                    j["code_barres"] = j.get("ticket_numero", "")
+                    j["prix"] = j.get("ticket_total", "")
             return jobs
+
+    # ---------- tickets de caisse : TOUS les produits dans UN SEUL ticket ----------
+    def create_ticket(self, lignes, shop_name, date_ticket, params=None):
+        """lignes: [{product_id, nom, prix_unitaire, quantite}] -> UN seul ticket enregistré en transaction AVANT impression.
+        Retourne ticket_id. Le total est calculé côté DB (fiable)."""
+        if not lignes:
+            raise ValueError("Ticket vide : sélectionnez au moins un produit.")
+        if not (shop_name or "").strip():
+            raise ValueError("Nom du commerce obligatoire.")
+        tid = uuid.uuid4().hex[:12]
+        now = _now()
+        # numéro unique type T-20250930-XXXX
+        with self.tx() as con:
+            for _ in range(50):
+                import random
+                from datetime import datetime as _dt
+                try:
+                    dpart = _dt.fromisoformat(date_ticket).strftime("%Y%m%d")
+                except Exception:
+                    dpart = _dt.now().strftime("%Y%m%d")
+                numero = f"T-{dpart}-{random.randint(1000, 9999)}"
+                if not con.execute("SELECT 1 FROM tickets WHERE numero=?", (numero,)).fetchone():
+                    break
+            else:
+                numero = f"T-{uuid.uuid4().hex[:8].upper()}"
+            total = 0.0
+            norm = []
+            for l in lignes:
+                try:
+                    q = float(l.get("quantite", 1) or 1)
+                except Exception:
+                    q = 1.0
+                if q <= 0:
+                    raise ValueError(f"Quantité invalide pour '{l.get('nom','?')}'.")
+                try:
+                    pu = float(l.get("prix_unitaire", 0) or 0)
+                except Exception:
+                    raise ValueError(f"Prix invalide pour '{l.get('nom','?')}'.")
+                if pu < 0:
+                    raise ValueError(f"Prix négatif pour '{l.get('nom','?')}'.")
+                tl = round(q * pu, 2)
+                total += tl
+                norm.append((l, q, pu, tl))
+            total = round(total, 2)
+            con.execute("INSERT INTO tickets(id,numero,shop_name,date_ticket,created_at,nb_lignes,total,statut,params_json) VALUES (?,?,?,?,?,?,?,?,?)",
+                        (tid, numero, shop_name.strip(), date_ticket, now, len(norm), total, "ENREGISTRE",
+                         json.dumps(params or {}, ensure_ascii=False)))
+            for l, q, pu, tl in norm:
+                snap = {"product_id": l.get("product_id"), "nom": l.get("nom", ""),
+                        "reference": l.get("reference", ""), "code_barres": l.get("code_barres", ""),
+                        "prix_unitaire": pu, "quantite": q, "total_ligne": tl}
+                con.execute("INSERT INTO ticket_items(id,ticket_id,product_id,snapshot_json,quantite,prix_unitaire,total_ligne) VALUES (?,?,?,?,?,?,?)",
+                            (uuid.uuid4().hex[:12], tid, l.get("product_id"),
+                             json.dumps(snap, ensure_ascii=False), q, pu, tl))
+        return tid
+
+    def get_ticket(self, ticket_id):
+        with self.tx() as con:
+            t = con.execute("SELECT * FROM tickets WHERE id=?", (ticket_id,)).fetchone()
+            if not t:
+                return None
+            items = con.execute("SELECT * FROM ticket_items WHERE ticket_id=? ORDER BY rowid", (ticket_id,)).fetchall()
+            d = dict(t)
+            d["items"] = [dict(r) for r in items]
+            for it in d["items"]:
+                try:
+                    it["snapshot"] = json.loads(it["snapshot_json"])
+                except Exception:
+                    it["snapshot"] = {}
+            return d
+
+    def list_tickets(self, search="", limit=300):
+        q = "SELECT * FROM tickets WHERE 1=1"
+        params = []
+        if search:
+            q += " AND (numero LIKE ? OR shop_name LIKE ?)"
+            s = f"%{search}%"
+            params += [s, s]
+        q += " ORDER BY date_ticket DESC, created_at DESC LIMIT ?"
+        params.append(limit)
+        with self.tx() as con:
+            return [dict(r) for r in con.execute(q, params).fetchall()]
 
     def dashboard_stats(self):
         with self.tx() as con:
@@ -522,12 +653,18 @@ class Database:
             lb = con.execute("SELECT COALESCE(SUM(nb_etiquettes),0) s FROM label_batches").fetchone()["s"]
             imp = con.execute("SELECT COUNT(*) c FROM print_jobs WHERE statut='IMPRIME'").fetchone()["c"]
             ech = con.execute("SELECT COUNT(*) c FROM print_jobs WHERE statut='ECHEC'").fetchone()["c"]
+            try:
+                tk_count = con.execute("SELECT COUNT(*) c FROM tickets").fetchone()["c"]
+                tk_total = con.execute("SELECT COALESCE(SUM(total),0) s FROM tickets").fetchone()["s"]
+            except Exception:
+                tk_count, tk_total = 0, 0
             last_ops = [dict(r) for r in con.execute(
                 "SELECT * FROM print_jobs ORDER BY created_at DESC LIMIT 8").fetchall()]
             recents = [dict(r) for r in con.execute(
                 "SELECT * FROM products ORDER BY date_creation DESC LIMIT 8").fetchall()]
         return {"produits": p, "barcodes": bc, "etiquettes": lb, "imprimes": imp,
-                "echecs": ech, "last_ops": last_ops, "recents": recents}
+                "echecs": ech, "tickets": tk_count, "tickets_total": tk_total,
+                "last_ops": last_ops, "recents": recents}
 
     # ---------- backups log ----------
     def log_backup(self, fichier, taille, typ="manuel", commentaire=""):
