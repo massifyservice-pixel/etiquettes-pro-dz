@@ -708,7 +708,36 @@ class App(tk.Tk):
 
     # ================= TICKETS DE CAISSE : UN SEUL TICKET = TOUS LES PRODUITS =================
     def _build_tickets(self):
-        f = self.pages["tickets"]
+        outer = self.pages["tickets"]
+        # Conteneur scrollable : la section Planche A4 en bas reste accessible même sur petit écran
+        _canvas = tk.Canvas(outer, highlightthickness=0)
+        _scroll = ttk.Scrollbar(outer, orient="vertical", command=_canvas.yview)
+        f = ttk.Frame(_canvas)
+        f.bind("<Configure>", lambda e: _canvas.configure(scrollregion=_canvas.bbox("all")))
+        _win = _canvas.create_window((0, 0), window=f, anchor="nw")
+        _canvas.configure(yscrollcommand=_scroll.set)
+        _canvas.pack(side="left", fill="both", expand=True)
+        _scroll.pack(side="right", fill="y")
+        def _on_mousewheel(e):
+            try:
+                _canvas.yview_scroll(int(-1 * (e.delta / 120)), "units")
+            except Exception:
+                pass
+        def _on_mousewheel_linux(e):
+            try:
+                _canvas.yview_scroll(-1 if e.num == 4 else 1, "units")
+            except Exception:
+                pass
+        f.bind("<Enter>", lambda e: _canvas.bind_all("<MouseWheel>", _on_mousewheel))
+        f.bind("<Leave>", lambda e: _canvas.unbind_all("<MouseWheel>"))
+        _canvas.bind_all("<Button-4>", _on_mousewheel_linux)
+        _canvas.bind_all("<Button-5>", _on_mousewheel_linux)
+        def _resize_inner(e):
+            try:
+                _canvas.itemconfig(_win, width=e.width)
+            except Exception:
+                pass
+        _canvas.bind("<Configure>", _resize_inner)
         tk.Label(f, text="Tickets de caisse — TOUS les produits dans UN seul ticket", font=("Segoe UI", 16, "bold")).pack(anchor="w")
         ttk.Label(f, text="Sélectionnez N produits → 1 seul ticket (pas 1 ticket par produit). Nom boutique + date aléatoires et customisables.",
                   foreground="#4b5563").pack(anchor="w")
